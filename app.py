@@ -429,7 +429,7 @@ from mediapipe.python.solutions import face_mesh as mp_face_mesh
 def load_assets():
     interpreter = tf.lite.Interpreter(model_path="iris_pure_float32.tflite")
     interpreter.allocate_tensors()
-    lens_img = cv2.imread("images/1.png", cv2.IMREAD_UNCHANGED)
+    lens_img = cv2.imread("images/7.png", cv2.IMREAD_UNCHANGED)
     return interpreter, lens_img
 
 interpreter, lens_img = load_assets()
