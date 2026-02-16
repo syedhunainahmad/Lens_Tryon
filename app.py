@@ -414,7 +414,7 @@
 #     }
 # )
 
-
+#perfect one
 import cv2
 import numpy as np
 import streamlit as st
@@ -547,7 +547,156 @@ webrtc_streamer(
     }
 )
 
+import cv2
+import numpy as np
+import streamlit as st
+from streamlit_webrtc import webrtc_streamer, VideoTransformerBase, RTCConfiguration
+import tensorflow as tf
+from av import VideoFrame
+import mediapipe as mp
+from mediapipe.python.solutions import face_mesh as mp_face_mesh
 
+# --- 1. Resources Loading (Cached for Speed) ---
+@st.cache_resource
+def load_assets():
+    # TFLite Interpreter load karein
+    interpreter = tf.lite.Interpreter(model_path="iris_pure_float32.tflite")
+    interpreter.allocate_tensors()
+    # Lens texture load karein (Ensure 7.png exists in images folder)
+    lens_img = cv2.imread("images/7.png", cv2.IMREAD_UNCHANGED)
+    return interpreter, lens_img
+
+interpreter, lens_img = load_assets()
+input_details = interpreter.get_input_details()
+output_details = interpreter.get_output_details()
+
+# Mediapipe Mesh setup
+face_mesh_tool = mp_face_mesh.FaceMesh(
+    refine_landmarks=True,
+    min_detection_confidence=0.5,
+    min_tracking_confidence=0.5
+)
+
+# --- 2. Model Prediction Logic ---
+def predict_mask_with_model(crop):
+    # UNet input processing (384x384 standard for your model)
+    img = cv2.resize(crop, (384, 384)).astype(np.float32) / 255.0
+    interpreter.set_tensor(input_details[0]['index'], np.expand_dims(img, axis=0))
+    interpreter.invoke()
+    pred = interpreter.get_tensor(output_details[0]['index'])[0]
+    
+    # Mask creation with a slightly lower threshold for better visibility
+    mask = (np.squeeze(pred) > 0.15).astype(np.uint8) * 255
+    return cv2.resize(mask, (crop.shape[1], crop.shape[0]))
+
+# --- 3. Optimized Hybrid Lens Logic ---
+def apply_hybrid_lens(frame, landmarks, lens_texture, last_masks, run_model):
+    h, w = frame.shape[:2]
+    
+    # Precise Eyelid Landmarks for perfect clipping
+    LEFT_EYE_PTS = [33, 7, 163, 144, 145, 153, 154, 155, 133, 173, 157, 158, 159, 160, 161, 246]
+    RIGHT_EYE_PTS = [362, 382, 381, 380, 374, 373, 390, 249, 263, 466, 388, 387, 386, 385, 384, 398]
+
+    eye_configs = [
+        (468, 471, LEFT_EYE_PTS, 0), # Left Eye
+        (473, 476, RIGHT_EYE_PTS, 1)  # Right Eye
+    ]
+
+    current_masks = [None, None]
+    
+    for iris_idx, edge_idx, eye_pts, idx in eye_configs:
+        try:
+            # Coordinates and Dynamic Radius
+            cx, cy = int(landmarks[iris_idx].x * w), int(landmarks[iris_idx].y * h)
+            ex, ey = int(landmarks[edge_idx].x * w), int(landmarks[edge_idx].y * h)
+            r = int(np.sqrt((cx - ex)**2 + (cy - ey)**2) * 1.3)
+            
+            # ROI (Region of Interest)
+            y1, y2, x1, x2 = max(0, cy-r), min(h, cy+r), max(0, cx-r), min(w, cx+r)
+            crop = frame[y1:y2, x1:x2].copy()
+            if crop.size == 0: continue
+            ch, cw = crop.shape[:2]
+
+            # 1. UNet Mask (Only run if run_model is True)
+            if run_model or last_masks[idx] is None:
+                m_mask = predict_mask_with_model(crop)
+                current_masks[idx] = m_mask
+            else:
+                m_mask = cv2.resize(last_masks[idx], (cw, ch))
+                current_masks[idx] = last_masks[idx]
+
+            # 2. Geometric Circle (Backup for stability)
+            geo_mask = np.zeros((ch, cw), dtype=np.uint8)
+            cv2.circle(geo_mask, (cw//2, ch//2), int(r * 0.92), 255, -1)
+
+            # 3. MediaPipe Eyelid Occlusion (Correct Relative Coordinates)
+            occ_mask = np.zeros((ch, cw), dtype=np.uint8)
+            eye_poly = np.array([[(int(landmarks[p].x * w) - x1), (int(landmarks[p].y * h) - y1)] for p in eye_pts], dtype=np.int32)
+            cv2.fillPoly(occ_mask, [eye_poly], 255)
+
+            # 4. Hybrid Combination
+            # Iris = (UNet OR Circle) AND Eyelids
+            final_mask = cv2.bitwise_and(cv2.bitwise_or(m_mask, geo_mask), occ_mask)
+            final_mask = cv2.GaussianBlur(final_mask, (5, 5), 0)
+
+            # 5. Natural Alpha Blending
+            lens_res = cv2.resize(lens_texture, (cw, ch), interpolation=cv2.INTER_AREA)
+            
+            if lens_res.shape[2] == 4:
+                alpha_tex = (lens_res[:, :, 3].astype(float) / 255.0)
+                alpha_mask = (final_mask.astype(float) / 255.0)
+                alpha_combined = cv2.merge([alpha_tex * alpha_mask] * 3)
+                
+                fg = lens_res[:, :, :3].astype(float) * alpha_combined
+                bg = crop.astype(float) * (1.0 - alpha_combined)
+                frame[y1:y2, x1:x2] = cv2.add(fg, bg).astype(np.uint8)
+
+        except Exception: continue
+        
+    return frame, current_masks
+
+# --- 4. Streamlit Video Processor ---
+class VideoProcessor(VideoTransformerBase):
+    def __init__(self):
+        self.frame_count = 0
+        self.last_masks = [None, None]
+
+    def recv(self, frame):
+        self.frame_count += 1
+        img = frame.to_ndarray(format="bgr24")
+        img = cv2.flip(img, 1)
+        
+        # Speed ke liye 640x480 resolution best hai
+        img_proc = cv2.resize(img, (640, 480))
+        rgb = cv2.cvtColor(img_proc, cv2.COLOR_BGR2RGB)
+        
+        results = face_mesh_tool.process(rgb)
+        
+        if results.multi_face_landmarks:
+            landmarks = results.multi_face_landmarks[0].landmark
+            
+            # Lag fix: Har alternate frame par UNet chalaein
+            run_model = (self.frame_count % 2 == 0)
+            img_proc, new_masks = apply_hybrid_lens(img_proc, landmarks, lens_img, self.last_masks, run_model)
+            
+            if run_model:
+                self.last_masks = new_masks
+            
+        return VideoFrame.from_ndarray(cv2.resize(img_proc, (img.shape[1], img.shape[0])), format="bgr24")
+
+# --- 5. Execution ---
+RTC_CONFIG = RTCConfiguration({"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]})
+
+st.title("Pro Hybrid Lens AR (UNet + MediaPipe)")
+st.write("Processing... Stable clipping enabled.")
+
+webrtc_streamer(
+    key="hybrid-lens-pro",
+    video_processor_factory=VideoProcessor,
+    rtc_configuration=RTC_CONFIG,
+    async_processing=True,
+    media_stream_constraints={"video": True, "audio": False}
+)
 
 # import cv2
 # import numpy as np
