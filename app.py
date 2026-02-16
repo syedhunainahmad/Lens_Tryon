@@ -162,7 +162,11 @@ import cv2
 import numpy as np
 import streamlit as st
 from streamlit_webrtc import webrtc_streamer, VideoTransformerBase, RTCConfiguration
-import tflite_runtime.interpreter as tflite
+try:
+    import tflite_runtime.interpreter as tflite
+except ImportError:
+    from tensorflow import lite as tflite
+# import tflite_runtime.interpreter as tflite
 from av import VideoFrame
 import mediapipe as mp
 from mediapipe.python.solutions import face_mesh as mp_face_mesh
