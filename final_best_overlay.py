@@ -14,7 +14,7 @@ input_details = interpreter.get_input_details()
 output_details = interpreter.get_output_details()
 
 # Lens Texture load karein (Make sure path is correct)
-LENS_PATH = "images/1.png" 
+LENS_PATH = "images/2.png" 
 lens_img = cv2.imread(LENS_PATH, cv2.IMREAD_UNCHANGED)
 
 # Mediapipe Face Mesh Setup
