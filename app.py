@@ -1181,61 +1181,39 @@ class VideoProcessor(VideoTransformerBase):
         self.frame_count += 1
         img = frame.to_ndarray(format="bgr24")
         img = cv2.flip(img, 1)
-        img_proc = cv2.resize(img, (640, 480))
+        # Mobile ke liye resolution thori kam rakhein taaki speed milay
+        img_proc = cv2.resize(img, (480, 360)) 
         results = face_mesh_tool.process(cv2.cvtColor(img_proc, cv2.COLOR_BGR2RGB))
         
         if results.multi_face_landmarks:
-            run_model = (self.frame_count % 2 == 0)
+            run_model = (self.frame_count % 3 == 0) # Har 3rd frame par UNet chalayein mobile ke liye
             img_proc, self.last_masks = apply_hybrid_lens(img_proc, results.multi_face_landmarks[0].landmark, lens_img, self.last_masks, run_model)
             
         return VideoFrame.from_ndarray(cv2.resize(img_proc, (img.shape[1], img.shape[0])), format="bgr24")
 
-# --- 4. Main UI & WebRTC Configuration ---
-st.set_page_config(page_title="Lens AR Pro", layout="wide")
+# --- 4. Main UI ---
+st.set_page_config(page_title="Lens AR Mobile", layout="wide")
 
-# Enhanced STUN configuration for Internet Deployment
+# Best Public ICE Servers for Mobile
 RTC_CONFIG = RTCConfiguration(
     {"iceServers": [
-        {"urls": ["stun:stun.l.google.com:19302"]},
-        {"urls": ["stun:stun1.l.google.com:19302"]},
-        {"urls": ["stun:stun.services.mozilla.com"]},
-        {"urls": ["stun:stun.cloudflare.com:3478"]}
+        {"urls": ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"]},
+        {"urls": ["stun:stun.l.google.com:19305"]},
+        {"urls": ["stun:stun.anyfirewall.com:3478"]} # Extra fallback
     ]}
 )
 
-mode = st.sidebar.selectbox("Choose Mode", ["Live AR Video", "Photo Try-on"])
+st.title("📹 Mobile Live AR")
 
-if mode == "Live AR Video":
-    st.title("📹 Live Lens Try-on")
-    st.markdown("---")
-    webrtc_streamer(
-        key="live-ar-v1",
-        mode=WebRtcMode.SENDRECV,
-        video_processor_factory=VideoProcessor, 
-        rtc_configuration=RTC_CONFIG,
-        async_processing=True,
-        media_stream_constraints={"video": True, "audio": False}
-    )
-
-else:
-    st.title("📸 Photo Capture Try-on")
-    st.markdown("---")
-    img_file = st.camera_input("Take a high-quality selfie")
-
-    if img_file:
-        file_bytes = np.frombuffer(img_file.getvalue(), np.uint8)
-        cv2_img = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
-        
-        with st.spinner("Applying HD Lenses..."):
-            rgb_img = cv2.cvtColor(cv2_img, cv2.COLOR_BGR2RGB)
-            results = face_mesh_tool.process(rgb_img)
-            
-            if results.multi_face_landmarks:
-                final_img, _ = apply_hybrid_lens(cv2_img, results.multi_face_landmarks[0].landmark, lens_img, is_hd=True)
-                # Fixed: use_column_width instead of use_container_width
-                st.image(final_img, channels="BGR", use_column_width=True, caption="HD Result")
-                
-                ret, buffer = cv2.imencode('.jpg', final_img)
-                st.download_button("Download High-Res Photo", buffer.tobytes(), "my_new_look.jpg", "image/jpeg")
-            else:
-                st.error("Face not detected. Please try again with better lighting.")
+webrtc_streamer(
+    key="mobile-live-ar",
+    mode=WebRtcMode.SENDRECV,
+    rtc_configuration=RTC_CONFIG,
+    video_processor_factory=VideoProcessor,
+    async_processing=True,
+    # Mobile browser constraints
+    media_stream_constraints={
+        "video": {"width": {"ideal": 640}, "height": {"ideal": 480}, "facingMode": "user"},
+        "audio": False
+    }
+)
