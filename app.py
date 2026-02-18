@@ -1085,11 +1085,10 @@
 #             else:
 #                 st.error("Face not detected. Please try again with better lighting.")
 
-
 import cv2
 import numpy as np
 import streamlit as st
-from streamlit_webrtc import webrtc_streamer, VideoTransformerBase, RTCConfiguration
+from streamlit_webrtc import webrtc_streamer, VideoTransformerBase, RTCConfiguration, WebRtcMode
 import tensorflow as tf
 from av import VideoFrame
 import mediapipe as mp
@@ -1098,9 +1097,14 @@ from mediapipe.python.solutions import face_mesh as mp_face_mesh
 # --- 1. Resources Loading ---
 @st.cache_resource
 def load_assets():
+    # TFLite Interpreter load karein
     interpreter = tf.lite.Interpreter(model_path="iris_pure_float32.tflite")
     interpreter.allocate_tensors()
+    # Ensure karein ke image path sahi ho
     lens_img = cv2.imread("images/6.png", cv2.IMREAD_UNCHANGED)
+    if lens_img is None:
+        # Placeholder agar image na milay meeting ke waqt
+        lens_img = np.zeros((500, 500, 4), dtype=np.uint8)
     return interpreter, lens_img
 
 interpreter, lens_img = load_assets()
@@ -1180,10 +1184,12 @@ class VideoProcessor(VideoTransformerBase):
         self.frame_count += 1
         img = frame.to_ndarray(format="bgr24")
         img = cv2.flip(img, 1)
+        # Processing resolution ko 640x480 rakhein for balance
         img_proc = cv2.resize(img, (640, 480))
         results = face_mesh_tool.process(cv2.cvtColor(img_proc, cv2.COLOR_BGR2RGB))
         
         if results.multi_face_landmarks:
+            # Alternate frame processing for lag reduction
             run_model = (self.frame_count % 2 == 0)
             img_proc, self.last_masks = apply_hybrid_lens(img_proc, results.multi_face_landmarks[0].landmark, lens_img, self.last_masks, run_model)
             
@@ -1191,21 +1197,28 @@ class VideoProcessor(VideoTransformerBase):
 
 # --- 4. Main UI & WebRTC Configuration ---
 st.set_page_config(page_title="Lens AR Pro", layout="wide")
+
+# STUN servers list for Public Deployment (NAT Traversal)
 RTC_CONFIG = RTCConfiguration(
     {"iceServers": [
         {"urls": ["stun:stun.l.google.com:19302"]},
         {"urls": ["stun:stun1.l.google.com:19302"]},
-        {"urls": ["stun:stun.services.mozilla.com"]}, # Mozilla ka server
-        {"urls": ["stun:stun.l.google.com:19305"]}
+        {"urls": ["stun:stun2.l.google.com:19302"]},
+        {"urls": ["stun:stun.services.mozilla.com"]}
     ]}
 )
-mode = st.sidebar.selectbox("Choose Mode", ["Live AR Video", "Photo Try-on"])
+
+mode = st.sidebar.selectbox("Select Mode", ["Live AR Video", "Photo Try-on"])
+
 if mode == "Live AR Video":
     st.title("📹 Live Lens Try-on")
+    st.info("Note: If connection takes long, please ensure you are on a stable HTTPS connection.")
+    
     webrtc_streamer(
-        key="live-ar",
-        video_processor_factory=VideoProcessor, 
+        key="hybrid-lens-ar",
+        mode=WebRtcMode.SENDRECV, # Explicitly set mode for better handshake
         rtc_configuration=RTC_CONFIG,
+        video_processor_factory=VideoProcessor,
         async_processing=True,
         media_stream_constraints={"video": True, "audio": False}
     )
@@ -1223,12 +1236,13 @@ else:
             results = face_mesh_tool.process(rgb_img)
             
             if results.multi_face_landmarks:
+                # HD Mode is enabled for static images
                 final_img, _ = apply_hybrid_lens(cv2_img, results.multi_face_landmarks[0].landmark, lens_img, is_hd=True)
                 
-                # FIXED: width='stretch' instead of use_container_width
-                st.image(final_img, channels="BGR", width=None, caption="HD Result")
+                # Using st.image without width='stretch' to avoid deprecation warnings
+                st.image(final_img, channels="BGR", use_column_width=True, caption="Your HD Preview")
                 
                 ret, buffer = cv2.imencode('.jpg', final_img)
                 st.download_button("Download High-Res Photo", buffer.tobytes(), "my_new_look.jpg", "image/jpeg")
             else:
-                st.error("Face not detected. Please try again.")
+                st.error("Face not detected. Please ensure your face is clearly visible.")
