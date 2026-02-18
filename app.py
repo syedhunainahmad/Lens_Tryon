@@ -943,10 +943,154 @@
 #     }
 # )
 
+# import cv2
+# import numpy as np
+# import streamlit as st
+# from streamlit_webrtc import webrtc_streamer, VideoTransformerBase, RTCConfiguration
+# import tensorflow as tf
+# from av import VideoFrame
+# import mediapipe as mp
+# from mediapipe.python.solutions import face_mesh as mp_face_mesh
+
+# # --- 1. Resources Loading ---
+# @st.cache_resource
+# def load_assets():
+#     interpreter = tf.lite.Interpreter(model_path="iris_pure_float32.tflite")
+#     interpreter.allocate_tensors()
+#     lens_img = cv2.imread("images/6.png", cv2.IMREAD_UNCHANGED)
+#     return interpreter, lens_img
+
+# interpreter, lens_img = load_assets()
+# input_details = interpreter.get_input_details()
+# output_details = interpreter.get_output_details()
+
+# face_mesh_tool = mp_face_mesh.FaceMesh(
+#     refine_landmarks=True,
+#     min_detection_confidence=0.5,
+#     min_tracking_confidence=0.5
+# )
+
+# # --- 2. Core Functions ---
+# def predict_mask_with_model(crop):
+#     img = cv2.resize(crop, (384, 384)).astype(np.float32) / 255.0
+#     interpreter.set_tensor(input_details[0]['index'], np.expand_dims(img, axis=0))
+#     interpreter.invoke()
+#     pred = interpreter.get_tensor(output_details[0]['index'])[0]
+#     mask = (np.squeeze(pred) > 0.15).astype(np.uint8) * 255
+#     return cv2.resize(mask, (crop.shape[1], crop.shape[0]))
+
+# def apply_hybrid_lens(frame, landmarks, lens_texture, last_masks=None, run_model=True, is_hd=False):
+#     h, w = frame.shape[:2]
+#     LEFT_EYE_PTS = [33, 7, 163, 144, 145, 153, 154, 155, 133, 173, 157, 158, 159, 160, 161, 246]
+#     RIGHT_EYE_PTS = [362, 382, 381, 380, 374, 373, 390, 249, 263, 466, 388, 387, 386, 385, 384, 398]
+
+#     eye_configs = [(468, 471, LEFT_EYE_PTS, 0), (473, 476, RIGHT_EYE_PTS, 1)]
+#     current_masks = [None, None]
+    
+#     for iris_idx, edge_idx, eye_pts, idx in eye_configs:
+#         try:
+#             cx, cy = int(landmarks[iris_idx].x * w), int(landmarks[iris_idx].y * h)
+#             ex, ey = int(landmarks[edge_idx].x * w), int(landmarks[edge_idx].y * h)
+#             r = int(np.sqrt((cx - ex)**2 + (cy - ey)**2) * 1.3)
+            
+#             y1, y2, x1, x2 = max(0, cy-r), min(h, cy+r), max(0, cx-r), min(w, cx+r)
+#             crop = frame[y1:y2, x1:x2].copy()
+#             if crop.size == 0: continue
+#             ch, cw = crop.shape[:2]
+
+#             # Mask Logic
+#             if run_model or last_masks is None or last_masks[idx] is None:
+#                 m_mask = predict_mask_with_model(crop)
+#                 current_masks[idx] = m_mask
+#             else:
+#                 m_mask = cv2.resize(last_masks[idx], (cw, ch))
+#                 current_masks[idx] = last_masks[idx]
+
+#             geo_mask = np.zeros((ch, cw), dtype=np.uint8)
+#             cv2.circle(geo_mask, (cw//2, ch//2), int(r * 0.92), 255, -1)
+
+#             occ_mask = np.zeros((ch, cw), dtype=np.uint8)
+#             eye_poly = np.array([[(int(landmarks[p].x * w) - x1), (int(landmarks[p].y * h) - y1)] for p in eye_pts], dtype=np.int32)
+#             cv2.fillPoly(occ_mask, [eye_poly], 255)
+
+#             final_mask = cv2.bitwise_and(cv2.bitwise_or(m_mask, geo_mask), occ_mask)
+            
+#             # HD Mode: Extra softening for static photos
+#             blur_size = (11, 11) if is_hd else (5, 5)
+#             final_mask = cv2.GaussianBlur(final_mask, blur_size, 0)
+
+#             lens_res = cv2.resize(lens_texture, (cw, ch), interpolation=cv2.INTER_LANCZOS4)
+#             if lens_res.shape[2] == 4:
+#                 alpha = (lens_res[:, :, 3].astype(float) / 255.0) * (final_mask.astype(float) / 255.0)
+#                 # Photo mode mein opacity thori natural rakhein
+#                 if is_hd: alpha *= 0.9 
+                
+#                 alpha_3d = cv2.merge([alpha] * 3)
+#                 fg = lens_res[:, :, :3].astype(float) * alpha_3d
+#                 bg = crop.astype(float) * (1.0 - alpha_3d)
+#                 frame[y1:y2, x1:x2] = cv2.add(fg, bg).astype(np.uint8)
+#         except: continue
+#     return frame, current_masks
+
+# # --- 3. Video Processor Class ---
+# class VideoProcessor(VideoTransformerBase):
+#     def __init__(self):
+#         self.frame_count = 0
+#         self.last_masks = [None, None]
+
+#     def recv(self, frame):
+#         self.frame_count += 1
+#         img = frame.to_ndarray(format="bgr24")
+#         img = cv2.flip(img, 1)
+#         img_proc = cv2.resize(img, (640, 480))
+#         results = face_mesh_tool.process(cv2.cvtColor(img_proc, cv2.COLOR_BGR2RGB))
+        
+#         if results.multi_face_landmarks:
+#             run_model = (self.frame_count % 2 == 0)
+#             img_proc, self.last_masks = apply_hybrid_lens(img_proc, results.multi_face_landmarks[0].landmark, lens_img, self.last_masks, run_model)
+            
+#         return VideoFrame.from_ndarray(cv2.resize(img_proc, (img.shape[1], img.shape[0])), format="bgr24")
+
+# # --- 4. Main Streamlit UI ---
+# st.set_page_config(page_title="Lens AR Pro", layout="wide")
+# mode = st.sidebar.selectbox("Choose Mode", ["Live AR Video", "Photo Try-on"])
+
+# if mode == "Live AR Video":
+#     st.title("📹 Live Lens Try-on")
+#     webrtc_streamer(key="live-ar", video_processor_factory=VideoProcessor, 
+#                     rtc_configuration=RTCConfiguration({"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]}),
+#                     async_processing=True, media_stream_constraints={"video": True, "audio": False})
+
+# else:
+#     st.title("📸 Photo Capture Try-on")
+#     img_file = st.camera_input("Take a high-quality selfie")
+
+#     if img_file:
+#         file_bytes = np.frombuffer(img_file.getvalue(), np.uint8)
+#         cv2_img = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
+        
+#         with st.spinner("Applying HD Lenses..."):
+#             rgb_img = cv2.cvtColor(cv2_img, cv2.COLOR_BGR2RGB)
+#             results = face_mesh_tool.process(rgb_img)
+            
+#             if results.multi_face_landmarks:
+#                 # HD processing (is_hd=True, run_model=True)
+#                 final_img, _ = apply_hybrid_lens(cv2_img, results.multi_face_landmarks[0].landmark, lens_img, is_hd=True)
+                
+#                 st.image(final_img, channels="BGR", use_container_width=True, caption="HD Result")
+                
+#                 # Download Button
+#                 ret, buffer = cv2.imencode('.jpg', final_img)
+#                 st.download_button("Download High-Res Photo", buffer.tobytes(), "my_new_look.jpg", "image/jpeg")
+#             else:
+#                 st.error("Face not detected. Please try again with better lighting.")
+
+
+
 import cv2
 import numpy as np
 import streamlit as st
-from streamlit_webrtc import webrtc_streamer, VideoTransformerBase, RTCConfiguration
+from streamlit_webrtc import webrtc_streamer, VideoTransformerBase, RTCConfiguration, WebRtcMode
 import tensorflow as tf
 from av import VideoFrame
 import mediapipe as mp
@@ -998,7 +1142,6 @@ def apply_hybrid_lens(frame, landmarks, lens_texture, last_masks=None, run_model
             if crop.size == 0: continue
             ch, cw = crop.shape[:2]
 
-            # Mask Logic
             if run_model or last_masks is None or last_masks[idx] is None:
                 m_mask = predict_mask_with_model(crop)
                 current_masks[idx] = m_mask
@@ -1014,17 +1157,13 @@ def apply_hybrid_lens(frame, landmarks, lens_texture, last_masks=None, run_model
             cv2.fillPoly(occ_mask, [eye_poly], 255)
 
             final_mask = cv2.bitwise_and(cv2.bitwise_or(m_mask, geo_mask), occ_mask)
-            
-            # HD Mode: Extra softening for static photos
             blur_size = (11, 11) if is_hd else (5, 5)
             final_mask = cv2.GaussianBlur(final_mask, blur_size, 0)
 
             lens_res = cv2.resize(lens_texture, (cw, ch), interpolation=cv2.INTER_LANCZOS4)
             if lens_res.shape[2] == 4:
                 alpha = (lens_res[:, :, 3].astype(float) / 255.0) * (final_mask.astype(float) / 255.0)
-                # Photo mode mein opacity thori natural rakhein
                 if is_hd: alpha *= 0.9 
-                
                 alpha_3d = cv2.merge([alpha] * 3)
                 fg = lens_res[:, :, :3].astype(float) * alpha_3d
                 bg = crop.astype(float) * (1.0 - alpha_3d)
@@ -1032,7 +1171,7 @@ def apply_hybrid_lens(frame, landmarks, lens_texture, last_masks=None, run_model
         except: continue
     return frame, current_masks
 
-# --- 3. Video Processor Class ---
+# --- 3. Video Processor ---
 class VideoProcessor(VideoTransformerBase):
     def __init__(self):
         self.frame_count = 0
@@ -1051,18 +1190,36 @@ class VideoProcessor(VideoTransformerBase):
             
         return VideoFrame.from_ndarray(cv2.resize(img_proc, (img.shape[1], img.shape[0])), format="bgr24")
 
-# --- 4. Main Streamlit UI ---
+# --- 4. Main UI & WebRTC Configuration ---
 st.set_page_config(page_title="Lens AR Pro", layout="wide")
+
+# Enhanced STUN configuration for Internet Deployment
+RTC_CONFIG = RTCConfiguration(
+    {"iceServers": [
+        {"urls": ["stun:stun.l.google.com:19302"]},
+        {"urls": ["stun:stun1.l.google.com:19302"]},
+        {"urls": ["stun:stun.services.mozilla.com"]},
+        {"urls": ["stun:stun.cloudflare.com:3478"]}
+    ]}
+)
+
 mode = st.sidebar.selectbox("Choose Mode", ["Live AR Video", "Photo Try-on"])
 
 if mode == "Live AR Video":
     st.title("📹 Live Lens Try-on")
-    webrtc_streamer(key="live-ar", video_processor_factory=VideoProcessor, 
-                    rtc_configuration=RTCConfiguration({"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]}),
-                    async_processing=True, media_stream_constraints={"video": True, "audio": False})
+    st.markdown("---")
+    webrtc_streamer(
+        key="live-ar-v1",
+        mode=WebRtcMode.SENDRECV,
+        video_processor_factory=VideoProcessor, 
+        rtc_configuration=RTC_CONFIG,
+        async_processing=True,
+        media_stream_constraints={"video": True, "audio": False}
+    )
 
 else:
     st.title("📸 Photo Capture Try-on")
+    st.markdown("---")
     img_file = st.camera_input("Take a high-quality selfie")
 
     if img_file:
@@ -1074,12 +1231,10 @@ else:
             results = face_mesh_tool.process(rgb_img)
             
             if results.multi_face_landmarks:
-                # HD processing (is_hd=True, run_model=True)
                 final_img, _ = apply_hybrid_lens(cv2_img, results.multi_face_landmarks[0].landmark, lens_img, is_hd=True)
+                # Fixed: use_column_width instead of use_container_width
+                st.image(final_img, channels="BGR", use_column_width=True, caption="HD Result")
                 
-                st.image(final_img, channels="BGR", use_container_width=True, caption="HD Result")
-                
-                # Download Button
                 ret, buffer = cv2.imencode('.jpg', final_img)
                 st.download_button("Download High-Res Photo", buffer.tobytes(), "my_new_look.jpg", "image/jpeg")
             else:
