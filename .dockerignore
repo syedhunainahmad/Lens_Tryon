@@ -1,0 +1,13 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.git/
+.DS_Store
+build/
+dist/
+*.egg-info
+# Don't ignore model or images; they are needed inside the container
+# Ignore large local datasets you don't want in the image
+data/
+logs/
